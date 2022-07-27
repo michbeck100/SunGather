@@ -34,11 +34,11 @@ class SungrowInverter():
         }
         self.client = None
         
-        self.registers = [[]]
-        self.registers.pop() # Remove null value from list
-        self.registers_custom = [{'name': 'export_to_grid', 'unit': 'W', 'address': 'vr001'}, {'name': 'import_from_grid', 'unit': 'W', 'address': 'vr002'}, {'name': 'run_state', 'address': 'vr003'}, {'name': 'timestamp', 'address': 'vr004'}]
-        self.register_ranges = [[]]
-        self.register_ranges.pop() # Remove null value from list
+        self.registers = [{'name': 'export_to_grid', 'unit': 'W', 'address': None, 'type': 'read'},
+                          {'name': 'import_from_grid', 'unit': 'W', 'address': None, 'type': 'read'},
+                          {'name': 'run_state', 'address': None, 'type': 'read'},
+                          {'name': 'timestamp', 'address': None, 'type': 'read'}]
+        self.register_ranges = []
 
         self.latest_scrape = {}
 
@@ -60,8 +60,10 @@ class SungrowInverter():
             return False
         logging.info("Connection: " + str(self.client))
 
-        try: self.client.connect()
-        except: return False
+        try:
+            self.client.connect()
+        except:
+            return False
 
         time.sleep(3)       # Wait 3 seconds, fixes timing issues
         return True
@@ -90,79 +92,61 @@ class SungrowInverter():
         except: pass
         self.client = None
 
-    def configure_registers(self,registersfile):
+    def configure_registers(self, registersfile):
         # Check model so we can load only valid registers
-        if self.inverter_config.get('model'):
-            logging.info(f"Bypassing Model Detection, Using config: {self.inverter_config.get('model')}")
+        model = self.getInverterModel()
+        if model:
+            logging.info(f"Bypassing Model Detection, Using config: {model}")
         else:
             # Load just the register to detect model, then we can load the rest of registers based on returned model
-            for register in registersfile['registers'][0]['read']:
+            for register in registersfile['registers']['read']:
                 if register.get('name') == "device_type_code":
                     register['type'] = "read"
                     self.registers.append(register)
-                    if self.load_registers(register['type'], register['address'] -1, 1): # Needs to be address -1
-                        if isinstance(self.latest_scrape.get('device_type_code'),int):
+                    if self.load_registers('read', register['address'] - 1, 1): # Needs to be address -1
+                        if isinstance(self.latest_scrape.get('device_type_code'), int):
                             logging.warning(f"Unknown Type Code Detected: {self.latest_scrape.get('device_type_code')}")
                         else:
-                            self.inverter_config['model'] = self.latest_scrape.get('device_type_code')
-                            logging.info(f"Detected Model: {self.inverter_config.get('model')}")
+                            model = self.latest_scrape.get('device_type_code')
+                            self.inverter_config['model'] = model
+                            logging.info(f"Detected Model: {model}")
                     else:
                         logging.info(f'Model detection failed, please set model in config.py')
                     self.registers.pop()
                     break
 
         # Load register list based on name and value after checking model
-        for register in registersfile['registers'][0]['read']:
-            if register.get('level',3) <= self.inverter_config.get('level') or self.inverter_config.get('level') == 3:
+        for register in registersfile['registers']['read']:
+            if self.validateLevel(register) and self.validateModel(register):
                 register['type'] = "read"
-                register.pop('level')
-                if register.get('smart_meter') and self.inverter_config.get('smart_meter'):
-                    register.pop('models')
-                    self.registers.append(register)
-                elif register.get('models') and not self.inverter_config.get('level') == 3:
-                    for supported_model in register.get('models'):
-                        if supported_model == self.inverter_config.get('model'):
-                            register.pop('models')
-                            self.registers.append(register)
-                else:
-                    self.registers.append(register)
+                self.registers.append(register)
 
-        for register in registersfile['registers'][1]['hold']:
-            if register.get('level',3) <= self.inverter_config.get('level') or self.inverter_config.get('level') == 3:
+        for register in registersfile['registers']['hold']:
+            if self.validateLevel(register) and self.validateModel(register):
                 register['type'] = "hold"
-                register.pop('level')
-                if register.get('smart_meter') and self.inverter_config.get('smart_meter'):
-                    register.pop('models')
-                    self.registers.append(register)
-                elif register.get('models') and not self.inverter_config.get('level',1) == 3:
-                    for supported_model in register.get('models'):
-                        if supported_model == self.inverter_config.get('model'):
-                            register.pop('models')
-                            self.registers.append(register)
-                else:
-                    self.registers.append(register)
+                self.registers.append(register)
 
-        # Load register list based om name and value after checking model
-        for register_range in registersfile['scan'][0]['read']:
+        # Load register list based on name and value after checking model
+        for register_range in registersfile['scan']['read']:
             register_range_used = False
             register_range['type'] = "read"
             for register in self.registers:
-                if register.get("type") == register_range.get("type"):
-                    if register.get('address') >= register_range.get("start") and register.get('address') <= (register_range.get("start") + register_range.get("range")):
+                if register.get("type") == register_range.get("type") and register.get('address'):
+                    if register_range.get("start") <= register.get('address') <= (register_range.get("start") + register_range.get("range")):
                         register_range_used = True
-                        continue
+                        break
             if register_range_used:
                 self.register_ranges.append(register_range)
 
 
-        for register_range in registersfile['scan'][1]['hold']:
+        for register_range in registersfile['scan']['hold']:
             register_range_used = False
             register_range['type'] = "hold"
             for register in self.registers:
                 if register.get("type") == register_range.get("type"):
-                    if register.get('address') >= register_range.get("start") and register.get('address') <= (register_range.get("start") + register_range.get("range")):
+                    if register_range.get("start") <= register.get('address') <= (register_range.get("start") + register_range.get("range")):
                         register_range_used = True
-                        continue
+                        break
             if register_range_used:
                 self.register_ranges.append(register_range)
         return True
@@ -171,9 +155,9 @@ class SungrowInverter():
         try:
             logging.debug(f'load_registers: {register_type}, {start}:{count}')
             if register_type == "read":
-                rr = self.client.read_input_registers(start,count=count, unit=self.inverter_config['slave'])
+                rr = self.client.read_input_registers(start, count=count, unit=self.inverter_config['slave'])
             elif register_type == "hold":
-                rr = self.client.read_holding_registers(start,count=count, unit=self.inverter_config['slave'])
+                rr = self.client.read_holding_registers(start, count=count, unit=self.inverter_config['slave'])
             else:
                 raise RuntimeError(f"Unsupported register type: {type}")
         except Exception as err:
@@ -248,10 +232,7 @@ class SungrowInverter():
 
     def validateRegister(self, check_register):
         for register in self.registers:
-            if check_register == register['name']:
-                return True
-        for register in self.registers_custom:
-            if check_register == register['name']:
+            if check_register == register['name'] and self.validateRegister(register):
                 return True
         return False
 
@@ -259,16 +240,10 @@ class SungrowInverter():
         for register in self.registers:
             if check_register == register['name']:
                 return register['address']
-        for register in self.registers_custom:
-            if check_register == register['name']:
-                return register['address']
         return '----'
 
     def getRegisterUnit(self, check_register):
         for register in self.registers:
-            if check_register == register['name']:
-                return register.get('unit','')
-        for register in self.registers_custom:
             if check_register == register['name']:
                 return register.get('unit','')
         return ''
@@ -278,6 +253,12 @@ class SungrowInverter():
             if check_register == register:
                 return True
         return False
+
+    def validateLevel(self, register):
+        return register.get('level', 3) <= self.inverter_config.get('level') or self.inverter_config.get('level') == 3
+
+    def validateModel(self, register):
+        return not register.get('models') or self.getInverterModel() in register['models']
 
     def getRegisterValue(self, check_register):
         for register, value in self.latest_scrape.items():
@@ -308,10 +289,10 @@ class SungrowInverter():
         load_registers_failed = 0
 
         for range in self.register_ranges:
-            load_registers_count +=1
+            load_registers_count += 1
             logging.debug(f'Scraping: {range.get("type")}, {range.get("start")}:{range.get("range")}')
             if not self.load_registers(range.get('type'), int(range.get('start')), int(range.get('range'))):
-                load_registers_failed +=1
+                load_registers_failed += 1
         if load_registers_failed == load_registers_count:
             # If every scrape fails, disconnect the client
             logging.warning
